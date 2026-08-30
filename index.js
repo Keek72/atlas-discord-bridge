@@ -207,22 +207,115 @@ ${genesisText || "(none)"}
             unreadable_or_uncertain: {
               type: "array",
               items: { type: "string" },
-            },
-          },
-          required: [
-            "source_type",
-            "visible_text",
-            "explicit_label_value_pairs",
-            "unreadable_or_uncertain",
-          ],
-          additionalProperties: false,
-        },
-      },
+async function extractLiteralGenesisEvidence(genesisText, imageUrls) {
+  if (imageUrls.length === 0) {
+    return {
+      source_type: "genesis_text",
+      visible_text: genesisText ? [genesisText] : [],
+      explicit_label_value_pairs: [],
+      unreadable_or_uncertain: [],
+    };
+  }
+
+  const content = [
+    {
+      type: "text",
+      text: `
+You are a literal transcription engine for screenshots produced by the Genesis Animation Throwdown bot.
+
+Do NOT analyze the game.
+
+Read only text that is visibly present.
+
+Rules:
+- Copy readable names, labels, numbers, and skill text literally.
+- Never interpret icons, artwork, portraits, colors, shapes, or symbols.
+- Never correct or guess a card name from game knowledge.
+- If a word is unclear, omit it rather than guessing.
+- Preserve visible numbers exactly.
+- Do not infer ownership, combo recipes, mastery, traits, deck strength, or game mechanics.
+
+Return ONLY a JSON object with exactly these four keys:
+
+{
+  "source_type": "genesis_text_and_image",
+  "visible_text": [],
+  "explicit_label_value_pairs": [],
+  "unreadable_or_uncertain": []
+}
+
+For explicit_label_value_pairs, each entry must look like:
+{
+  "label": "readable label",
+  "value": "readable value"
+}
+
+Genesis message text:
+${genesisText || "(none)"}
+      `.trim(),
+    },
+  ];
+
+  for (const url of imageUrls.slice(0, 3)) {
+    content.push({
+      type: "image_url",
+      image_url: { url },
+    });
+  }
+
+  const completion = await groq.chat.completions.create({
+    model: MODEL,
+    messages: [{ role: "user", content }],
+    temperature: 0.1,
+    max_completion_tokens: 1800,
+    reasoning_effort: "none",
+    response_format: {
+      type: "json_object",
     },
   });
 
   const raw = completion.choices[0]?.message?.content || "";
-  return parseJsonSafely(raw);
+
+  let parsed = {};
+
+  try {
+    parsed = parseJsonSafely(raw);
+  } catch (error) {
+    console.error("Genesis JSON parse warning:", error);
+
+    return {
+      source_type: genesisText
+        ? "genesis_text_and_image"
+        : "genesis_image",
+      visible_text: raw ? [raw] : [],
+      explicit_label_value_pairs: [],
+      unreadable_or_uncertain: [
+        "Structured transcription could not be parsed.",
+      ],
+    };
+  }
+
+  return {
+    source_type:
+      parsed.source_type ||
+      (genesisText
+        ? "genesis_text_and_image"
+        : "genesis_image"),
+
+    visible_text: Array.isArray(parsed.visible_text)
+      ? parsed.visible_text
+      : [],
+
+    explicit_label_value_pairs:
+      Array.isArray(parsed.explicit_label_value_pairs)
+        ? parsed.explicit_label_value_pairs
+        : [],
+
+    unreadable_or_uncertain:
+      Array.isArray(parsed.unreadable_or_uncertain)
+        ? parsed.unreadable_or_uncertain
+        : [],
+  };
 }
 
 async function analyzeGenesisEvidence(genesisText, evidence, precedingHumanText) {
