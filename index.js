@@ -109,7 +109,7 @@ client.on("messageCreate", async (message) => {
     await message.channel.sendTyping();
 
     const response = await openai.responses.create({
-  model: "qwen/qwen3.6-27b",
+  model: "qwen/qwen3.8-27b",
   reasoning: {
     effort: "none",
   },
