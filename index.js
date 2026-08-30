@@ -1,3 +1,16 @@
+const http = require("http");
+
+const port = process.env.PORT || 10000;
+
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Atlas Discord Bridge is online.\n");
+  })
+  .listen(port, "0.0.0.0", () => {
+    console.log(`Health server listening on port ${port}`);
+  });
+
 const { Client, GatewayIntentBits } = require("discord.js");
 const OpenAI = require("openai");
 
