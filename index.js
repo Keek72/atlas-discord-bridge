@@ -23,7 +23,8 @@ const client = new Client({
 });
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1",
 });
 
 client.once("ready", () => {
@@ -49,7 +50,7 @@ client.on("messageCreate", async (message) => {
     await message.channel.sendTyping();
 
     const response = await openai.responses.create({
-      model: "gpt-5.6",
+      model: "qwen/qwen3.6-27b",
       instructions: `You are Atlas, an Animation Throwdown research and deck-analysis assistant operating inside Discord.
 
 The user is building and optimizing Animation Throwdown decks.
