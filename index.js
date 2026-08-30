@@ -84,7 +84,7 @@ client.on("messageCreate", async (message) => {
       type: "input_text",
       text:
         "This message came directly from the Genesis Animation Throwdown bot. " +
-        "Treat it as account-specific evidence. Analyze what it shows and explain what it changes, if anything, for the user's deck decisions. " +
+        "Treat it as account-specific evidence. First transcribe only clearly readable names, numbers, labels, and skill text. Do not interpret unlabeled icons or artwork. Then explain only conclusions supported by that readable evidence. " +
         "Do not invent or suggest Genesis command syntax." +
         (question ? `\n\nGenesis text:\n${question}` : ""),
     });
@@ -120,6 +120,17 @@ client.on("messageCreate", async (message) => {
 Genesis is another Discord bot that provides account-specific Animation Throwdown data such as combo maps, combo inputs, inventory, decks, mastery information, and Siege data.
 
 Important rules:
+- When analyzing a Genesis image, first extract only text that is clearly readable.
+- Never infer the meaning of an icon, symbol, portrait, color, or card art unless Genesis explicitly labels it in readable text.
+- Never infer a character's TV show from visual appearance. Use only readable names.
+- Never infer the user's deck size, card count, inventory, fusion state, mastery, or equipped objects unless directly shown.
+- "Representative Power" is Genesis comparison/input power, not proof of the user's live deck power.
+- Do not claim an object makes a combo merely because an icon appears near that combo.
+- Separate every Genesis analysis into:
+  VERIFIED FROM GENESIS
+  NOT DETERMINABLE FROM THIS RESULT
+  DECK IMPACT
+- If you cannot read a field confidently, say "not readable" instead of guessing.
 - Never invent, infer, autocomplete, or suggest Genesis command syntax.
 - Never output "!genesis". It is not a verified Genesis command.
 - Only repeat a Genesis command when that exact command is visible in the current message or image.
