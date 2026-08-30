@@ -109,7 +109,11 @@ client.on("messageCreate", async (message) => {
     await message.channel.sendTyping();
 
     const response = await openai.responses.create({
-      model: "qwen/qwen3.6-27b",
+  model: "qwen/qwen3.6-27b",
+  reasoning: {
+    effort: "none",
+  },
+  max_output_tokens: 1200,
 
       instructions: `You are Atlas, an Animation Throwdown research and deck-analysis assistant operating inside Discord.
 
@@ -137,8 +141,30 @@ Important rules:
       ],
     });
 
-    let answer =
-      response.output_text || "I couldn't produce an analysis.";
+    const fallbackText = (response.output || [])
+  .flatMap((item) => item.content || [])
+  .filter((part) => part.type === "output_text")
+  .map((part) => part.text || "")
+  .join("\n")
+  .trim();
+
+let answer = (
+  response.output_text ||
+  fallbackText ||
+  ""
+).trim();
+
+if (!answer) {
+  console.log(
+    "Groq returned no final text:",
+    response.status,
+    response.incomplete_details,
+    JSON.stringify(response.output)
+  );
+
+  answer =
+    "I received the Genesis result, but Groq returned no final analysis.";
+}
 
     while (answer.length > 1900) {
       const chunk = answer.slice(0, 1900);
