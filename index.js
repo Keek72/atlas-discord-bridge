@@ -57,8 +57,6 @@ Hard evidence rules:
 - Never suggest a deck swap from a combo map alone unless the evidence also establishes relevant owned-input coverage.
 - Never invent or suggest Genesis command syntax.
 - If a field is uncertain or absent, say it is not determinable from this result.
-- Every section must contain at least one bullet.
-- DECK IMPACT must never be blank. If the evidence does not justify a deck change, write: "- No deck change is justified from this Genesis result alone."
 
 Output exactly these three short sections:
 **VERIFIED FROM GENESIS**
@@ -145,32 +143,17 @@ async function extractLiteralGenesisEvidence(genesisText, imageUrls) {
       text: `
 You are a literal transcription engine for screenshots produced by the Genesis Animation Throwdown bot.
 
-Do NOT analyze the game.
-
-Read only text that is visibly present.
+Your job is ONLY to extract visibly readable text. You are NOT analyzing the game.
 
 Rules:
-- Copy readable names, labels, numbers, and skill text literally.
-- Never interpret icons, artwork, portraits, colors, shapes, or symbols.
-- Never correct or guess a card name from game knowledge.
-- If a word is unclear, omit it rather than guessing.
-- Preserve visible numbers exactly.
-- Do not infer ownership, combo recipes, mastery, traits, deck strength, or game mechanics.
-
-Return ONLY a JSON object with exactly these four keys:
-
-{
-  "source_type": "genesis_text_and_image",
-  "visible_text": [],
-  "explicit_label_value_pairs": [],
-  "unreadable_or_uncertain": []
-}
-
-For explicit_label_value_pairs, each entry must look like:
-{
-  "label": "readable label",
-  "value": "readable value"
-}
+- Copy readable words, names, labels, numbers, and skill text as literally as possible.
+- Do not name, describe, or interpret icons, symbols, portraits, artwork, colors, shapes, or backgrounds.
+- Do not identify a character from artwork. A character name is valid only when printed as readable text.
+- Do not infer missing words from game knowledge.
+- Do not convert pictures into object names or game concepts.
+- If text is blurry or uncertain, omit it from visible_text and describe only the location as uncertain, without guessing the word.
+- Preserve numbers exactly as shown.
+- Genesis message text supplied below may be copied as text evidence, but do not add facts to it.
 
 Genesis message text:
 ${genesisText || "(none)"}
@@ -192,89 +175,52 @@ ${genesisText || "(none)"}
     max_completion_tokens: 1800,
     reasoning_effort: "none",
     response_format: {
-      type: "json_object",
+      type: "json_schema",
+      json_schema: {
+        name: "literal_genesis_evidence",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            source_type: {
+              type: "string",
+              enum: ["genesis_image", "genesis_text_and_image"],
+            },
+            visible_text: {
+              type: "array",
+              items: { type: "string" },
+            },
+            explicit_label_value_pairs: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string" },
+                  value: { type: "string" },
+                },
+                required: ["label", "value"],
+                additionalProperties: false,
+              },
+            },
+            unreadable_or_uncertain: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+          required: [
+            "source_type",
+            "visible_text",
+            "explicit_label_value_pairs",
+            "unreadable_or_uncertain",
+          ],
+          additionalProperties: false,
+        },
+      },
     },
   });
 
   const raw = completion.choices[0]?.message?.content || "";
-
-  let parsed = {};
-
-  try {
-    parsed = parseJsonSafely(raw);
-  } catch (error) {
-    console.error("Genesis JSON parse warning:", error);
-
-    return {
-      source_type: genesisText
-        ? "genesis_text_and_image"
-        : "genesis_image",
-      visible_text: raw ? [raw] : [],
-      explicit_label_value_pairs: [],
-      unreadable_or_uncertain: [
-        "Structured transcription could not be parsed.",
-      ],
-async function extractLiteralGenesisEvidence(genesisText, imageUrls) {
-  if (imageUrls.length === 0) {
-    return {
-      source_type: "genesis_text",
-      visible_text: genesisText ? [genesisText] : [],
-      unreadable_or_uncertain: [],
-    };
-  }
-
-  const content = [
-    {
-      type: "text",
-      text: `
-Read this Genesis Animation Throwdown screenshot literally.
-
-TRANSCRIPTION ONLY. Do not analyze the game.
-
-Rules:
-- Report only clearly readable printed text.
-- Include names, labels, numbers, stats, and skill text that you can actually read.
-- Never interpret icons, artwork, portraits, colors, symbols, or card images.
-- Never guess a card name from partial text.
-- Never infer ownership, recipes, mastery, traits, deck strength, or mechanics.
-- If something is unclear, write [UNCLEAR].
-- Keep the transcription concise.
-- Maximum 80 lines.
-
-Genesis message text:
-${genesisText || "(none)"}
-      `.trim(),
-    },
-  ];
-
-  // One Genesis map is enough for this pass.
-  // Limiting to one image also keeps us comfortably inside Groq's free token limits.
-  if (imageUrls[0]) {
-    content.push({
-      type: "image_url",
-      image_url: { url: imageUrls[0] },
-    });
-  }
-
-  const completion = await groq.chat.completions.create({
-    model: MODEL,
-    messages: [{ role: "user", content }],
-    temperature: 0.1,
-    max_completion_tokens: 900,
-    reasoning_effort: "none",
-    reasoning_format: "hidden",
-  });
-
-  const raw =
-    completion.choices[0]?.message?.content?.trim() || "";
-
-  return {
-    source_type: genesisText
-      ? "genesis_text_and_image"
-      : "genesis_image",
-    visible_text: raw ? raw.split("\n") : [],
-    unreadable_or_uncertain: [],
-  };
+  return parseJsonSafely(raw);
 }
 
 async function analyzeGenesisEvidence(genesisText, evidence, precedingHumanText) {
@@ -367,7 +313,10 @@ function queueGenesisMessage(message) {
         existing.imageUrls,
       );
 
-      console.log("Genesis literal evidence:", JSON.stringify(evidence));
+      console.log(
+        "Genesis literal evidence:",
+        JSON.stringify(evidence),
+      );
 
       const analysis = await analyzeGenesisEvidence(
         genesisText,
@@ -394,7 +343,8 @@ client.once("clientReady", () => {
 client.on("messageCreate", async (message) => {
   if (message.author.id === client.user.id) return;
 
-  const isGenesis = message.author.id === process.env.GENESIS_BOT_ID;
+  const isGenesis =
+    message.author.id === process.env.GENESIS_BOT_ID;
   const isTargetChannel =
     message.channel.id === process.env.DISCORD_CHANNEL_ID;
 
