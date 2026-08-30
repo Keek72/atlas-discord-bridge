@@ -214,29 +214,66 @@ ${genesisText || "(none)"}
       unreadable_or_uncertain: [
         "Structured transcription could not be parsed.",
       ],
+async function extractLiteralGenesisEvidence(genesisText, imageUrls) {
+  if (imageUrls.length === 0) {
+    return {
+      source_type: "genesis_text",
+      visible_text: genesisText ? [genesisText] : [],
+      unreadable_or_uncertain: [],
     };
   }
 
+  const content = [
+    {
+      type: "text",
+      text: `
+Read this Genesis Animation Throwdown screenshot literally.
+
+TRANSCRIPTION ONLY. Do not analyze the game.
+
+Rules:
+- Report only clearly readable printed text.
+- Include names, labels, numbers, stats, and skill text that you can actually read.
+- Never interpret icons, artwork, portraits, colors, symbols, or card images.
+- Never guess a card name from partial text.
+- Never infer ownership, recipes, mastery, traits, deck strength, or mechanics.
+- If something is unclear, write [UNCLEAR].
+- Keep the transcription concise.
+- Maximum 80 lines.
+
+Genesis message text:
+${genesisText || "(none)"}
+      `.trim(),
+    },
+  ];
+
+  // One Genesis map is enough for this pass.
+  // Limiting to one image also keeps us comfortably inside Groq's free token limits.
+  if (imageUrls[0]) {
+    content.push({
+      type: "image_url",
+      image_url: { url: imageUrls[0] },
+    });
+  }
+
+  const completion = await groq.chat.completions.create({
+    model: MODEL,
+    messages: [{ role: "user", content }],
+    temperature: 0.1,
+    max_completion_tokens: 900,
+    reasoning_effort: "none",
+    reasoning_format: "hidden",
+  });
+
+  const raw =
+    completion.choices[0]?.message?.content?.trim() || "";
+
   return {
-    source_type:
-      parsed.source_type ||
-      (genesisText ? "genesis_text_and_image" : "genesis_image"),
-
-    visible_text: Array.isArray(parsed.visible_text)
-      ? parsed.visible_text
-      : [],
-
-    explicit_label_value_pairs: Array.isArray(
-      parsed.explicit_label_value_pairs,
-    )
-      ? parsed.explicit_label_value_pairs
-      : [],
-
-    unreadable_or_uncertain: Array.isArray(
-      parsed.unreadable_or_uncertain,
-    )
-      ? parsed.unreadable_or_uncertain
-      : [],
+    source_type: genesisText
+      ? "genesis_text_and_image"
+      : "genesis_image",
+    visible_text: raw ? raw.split("\n") : [],
+    unreadable_or_uncertain: [],
   };
 }
 
