@@ -1,17 +1,32 @@
 const http = require("http");
+const crypto = require("crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const OpenAI = require("openai");
 
-const port = process.env.PORT || 10000;
-const MODEL = "qwen/qwen3.8-27b";
+const PORT = process.env.PORT || 10000;
+const MODEL = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
+const BUFFER_MS = Number(process.env.GENESIS_BUFFER_MS || 1600);
+
+const REQUIRED_ENV = [
+  "DISCORD_BOT_TOKEN",
+  "GROQ_API_KEY",
+  "GENESIS_BOT_ID",
+  "DISCORD_CHANNEL_ID",
+];
+
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`Missing required environment variable: ${key}`);
+  }
+}
 
 http
   .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Atlas Discord Bridge is online.\n");
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Peebles Genesis Bridge v2 is online.\n");
   })
-  .listen(port, "0.0.0.0", () => {
-    console.log(`Health server listening on port ${port}`);
+  .listen(PORT, "0.0.0.0", () => {
+    console.log(`Peebles health server listening on port ${PORT}`);
   });
 
 const client = new Client({
@@ -27,47 +42,79 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-const recentHumanMessages = new Map();
+// ---------------------------
+// Verified command workflow
+// ---------------------------
+
+const EDUCATED_AUDIT = [
+  "peggy",
+  "professor farnsworth",
+  "bob",
+  "bender",
+  "fry",
+  "hayley",
+  "gene",
+  "hank",
+  "bill",
+  "amy",
+  "stewie",
+  "tina",
+  "louise",
+  "lois",
+  "stan",
+  "peter",
+  "bobby",
+  "zapp",
+];
+
+const sessions = new Map();
 const genesisBuffers = new Map();
+const seenGenesisMessageIds = new Map();
+const recentPayloadHashes = new Map();
 
-const HUMAN_RULES = `
-You are Atlas, an Animation Throwdown assistant inside Discord.
+function newSession() {
+  return {
+    mode: "educated_audit",
+    trait: "educated",
+    audit: [...EDUCATED_AUDIT],
+    checked: new Set(),
+    currentCommand: null,
+    lastGenesisAt: 0,
+    lastResult: null,
+  };
+}
 
-Hard rules:
-- Never invent, infer, autocomplete, or advertise Genesis command syntax.
-- Never output "!genesis" unless the user literally included that exact text in the current message.
-- If exact Genesis syntax is not present in the current evidence, say it needs to be verified first.
-- Never claim access to the user's inventory, decks, mastery, recipes, or account history unless that information is present in the current message.
-- Do not invent card traits, TV shows, deck sizes, objects, recipes, mastery levels, or game categories.
-- For a greeting, give a short greeting only. Do not advertise commands or capabilities.
-- Be concise and practical.
-`;
+function sessionFor(channelId) {
+  if (!sessions.has(channelId)) sessions.set(channelId, newSession());
+  return sessions.get(channelId);
+}
 
-const GENESIS_ANALYSIS_RULES = `
-You are Atlas analyzing account-specific output produced by the Genesis bot for Animation Throwdown.
+function nextAuditCharacter(session) {
+  return session.audit.find((name) => !session.checked.has(name)) || null;
+}
 
-Use ONLY the evidence supplied below. Do not use outside game knowledge to fill gaps.
+function nextAuditCommand(session) {
+  const name = nextAuditCharacter(session);
+  return name ? `combos ${session.trait} ${name}` : null;
+}
 
-Hard evidence rules:
-- Never infer the meaning of an unlabeled icon, symbol, color, portrait, card art, background image, or visual motif.
-- Never invent object names, character names, traits, shows, deck types, recipes, mastery, card ownership, fusion state, or deck size.
-- Never claim an object makes a combo unless readable evidence explicitly says so.
-- A character/trait combo map confirms the combos shown for that filter. It does NOT prove the user's owned objects can make those combos.
-- "Representative Power" is Genesis comparison power for that result. It is NOT proof of the user's live deck power or owned card strength.
-- Never suggest a deck swap from a combo map alone unless the evidence also establishes relevant owned-input coverage.
-- Never invent or suggest Genesis command syntax.
-- If a field is uncertain or absent, say it is not determinable from this result.
+function normalize(text) {
+  return String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
 
-Output exactly these three short sections:
-**VERIFIED FROM GENESIS**
-Only facts directly supported by readable evidence.
+function commandCharacter(text, trait = "educated") {
+  const n = normalize(text);
+  const prefix = `combos ${trait} `;
+  if (!n.startsWith(prefix)) return null;
+  return n.slice(prefix.length).trim() || null;
+}
 
-**NOT DETERMINABLE FROM THIS RESULT**
-Only important unknowns that matter to interpretation.
-
-**DECK IMPACT**
-A conservative conclusion. If the result is insufficient for a swap, say so plainly.
-`;
+function markCommandObserved(session, text) {
+  const char = commandCharacter(text, session.trait);
+  if (!char) return;
+  session.currentCommand = `combos ${session.trait} ${char}`;
+  // Mark checked only after Genesis actually returns a result.
+}
 
 function getImageUrls(message) {
   const urls = [];
@@ -75,7 +122,6 @@ function getImageUrls(message) {
   for (const attachment of message.attachments.values()) {
     const type = attachment.contentType || "";
     const name = attachment.name || "";
-
     if (type.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(name)) {
       urls.push(attachment.url);
     }
@@ -86,16 +132,29 @@ function getImageUrls(message) {
     if (embed.thumbnail?.url) urls.push(embed.thumbnail.url);
   }
 
-  return [...new Set(urls)];
+  return [...new Set(urls)].slice(0, 3);
 }
 
-function parseJsonSafely(text) {
+function payloadHash(text, imageUrls) {
+  return crypto
+    .createHash("sha256")
+    .update(`${text}\n${imageUrls.join("\n")}`)
+    .digest("hex");
+}
+
+function pruneTTL(map, ttlMs) {
+  const now = Date.now();
+  for (const [key, at] of map.entries()) {
+    if (now - at > ttlMs) map.delete(key);
+  }
+}
+
+function safeJson(text) {
   const cleaned = String(text || "")
     .trim()
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
     .replace(/\s*```$/i, "");
-
   return JSON.parse(cleaned);
 }
 
@@ -105,8 +164,7 @@ async function sendInChunks(channel, text, replyMessage = null) {
 
   while (remaining.length > 1800) {
     let cut = remaining.lastIndexOf("\n", 1800);
-    if (cut < 1000) cut = 1800;
-
+    if (cut < 900) cut = 1800;
     const chunk = remaining.slice(0, cut).trim();
     remaining = remaining.slice(cut).trim();
 
@@ -119,49 +177,52 @@ async function sendInChunks(channel, text, replyMessage = null) {
   }
 
   if (remaining) {
-    if (replyMessage) {
-      await replyMessage.reply(remaining);
-    } else {
-      await channel.send(remaining);
-    }
+    if (replyMessage) await replyMessage.reply(remaining);
+    else await channel.send(remaining);
   }
 }
 
-async function extractLiteralGenesisEvidence(genesisText, imageUrls) {
-  if (imageUrls.length === 0) {
-    return {
-      source_type: "genesis_text",
-      visible_text: genesisText ? [genesisText] : [],
-      explicit_label_value_pairs: [],
-      unreadable_or_uncertain: [],
-    };
-  }
-
+async function analyzeGenesis(genesisText, imageUrls, context) {
   const content = [
     {
       type: "text",
       text: `
-You are a literal transcription engine for screenshots produced by the Genesis Animation Throwdown bot.
+You are Peebles, a literal evidence reader for Genesis Bot output from Animation Throwdown.
 
-Your job is ONLY to extract visibly readable text. You are NOT analyzing the game.
+CURRENT WORKFLOW CONTEXT
+Trait: ${context.trait}
+Command believed to have triggered this result: ${context.currentCommand || "(unknown)"}
 
-Rules:
-- Copy readable words, names, labels, numbers, and skill text as literally as possible.
-- Do not name, describe, or interpret icons, symbols, portraits, artwork, colors, shapes, or backgrounds.
-- Do not identify a character from artwork. A character name is valid only when printed as readable text.
-- Do not infer missing words from game knowledge.
-- Do not convert pictures into object names or game concepts.
-- If text is blurry or uncertain, omit it from visible_text and describe only the location as uncertain, without guessing the word.
-- Preserve numbers exactly as shown.
-- Genesis message text supplied below may be copied as text evidence, but do not add facts to it.
-
-Genesis message text:
+GENESIS MESSAGE TEXT
 ${genesisText || "(none)"}
+
+TASK
+Read the Genesis output literally. If images are supplied, inspect them carefully.
+
+Return ONLY valid JSON with exactly these keys:
+{
+  "fully_readable": boolean,
+  "unreadable": ["short descriptions of anything genuinely unreadable"],
+  "combo_names": ["combo names visibly shown"],
+  "visible_facts": ["other important literal facts visibly shown"],
+  "no_combos_found": boolean,
+  "confidence_note": "one short sentence"
+}
+
+HARD RULES
+- Do not use outside game knowledge.
+- Do not infer a name from artwork, portraits, icons, colors, card borders, or layout.
+- Never invent Genesis command syntax.
+- combo_names must contain only names visibly printed in this result.
+- If Genesis explicitly says no combos were found, set no_combos_found=true and combo_names=[].
+- If all meaningful text is readable, fully_readable=true and unreadable=[].
+- Do not recommend deck changes here.
+- Do not add commentary outside the JSON object.
       `.trim(),
     },
   ];
 
-  for (const url of imageUrls.slice(0, 3)) {
+  for (const url of imageUrls) {
     content.push({
       type: "image_url",
       image_url: { url },
@@ -171,113 +232,88 @@ ${genesisText || "(none)"}
   const completion = await groq.chat.completions.create({
     model: MODEL,
     messages: [{ role: "user", content }],
-    temperature: 0.1,
-    max_completion_tokens: 1800,
+    temperature: 0.05,
+    max_completion_tokens: 1200,
     reasoning_effort: "none",
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "literal_genesis_evidence",
-        strict: true,
-        schema: {
-          type: "object",
-          properties: {
-            source_type: {
-              type: "string",
-              enum: ["genesis_image", "genesis_text_and_image"],
-            },
-            visible_text: {
-              type: "array",
-              items: { type: "string" },
-            },
-            explicit_label_value_pairs: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  label: { type: "string" },
-                  value: { type: "string" },
-                },
-                required: ["label", "value"],
-                additionalProperties: false,
-              },
-            },
-            unreadable_or_uncertain: {
-              type: "array",
-              items: { type: "string" },
-            },
-          },
-          required: [
-            "source_type",
-            "visible_text",
-            "explicit_label_value_pairs",
-            "unreadable_or_uncertain",
-          ],
-          additionalProperties: false,
-        },
-      },
-    },
+    response_format: { type: "json_object" },
   });
 
-  const raw = completion.choices[0]?.message?.content || "";
-  return parseJsonSafely(raw);
+  return safeJson(completion.choices[0]?.message?.content || "{}");
 }
 
-async function analyzeGenesisEvidence(genesisText, evidence, precedingHumanText) {
-  const prompt = `
-${GENESIS_ANALYSIS_RULES}
+function resultMessage(session, evidence) {
+  const currentChar = commandCharacter(session.currentCommand || "", session.trait);
+  if (currentChar) session.checked.add(currentChar);
 
-PRECEDING HUMAN MESSAGE (context only, not proof of game facts):
-${precedingHumanText || "(none)"}
+  session.lastResult = evidence;
+  session.lastGenesisAt = Date.now();
 
-GENESIS MESSAGE TEXT:
-${genesisText || "(none)"}
+  const lines = [];
+  lines.push(evidence.fully_readable ? "**Fully readable. ✅**" : "**Not fully readable. ⚠️**");
 
-LITERAL VISION EXTRACTION:
-${JSON.stringify(evidence, null, 2)}
+  if (!evidence.fully_readable && Array.isArray(evidence.unreadable) && evidence.unreadable.length) {
+    lines.push(`Unreadable: ${evidence.unreadable.join("; ")}`);
+  }
 
-Important final check before answering:
-If a noun or game fact is not literally present in GENESIS MESSAGE TEXT or LITERAL VISION EXTRACTION, do not introduce it as a fact.
-  `.trim();
+  if (evidence.no_combos_found) {
+    lines.push("Genesis found **no matching combos** for this result.");
+  } else if (Array.isArray(evidence.combo_names) && evidence.combo_names.length) {
+    const label = evidence.combo_names.length === 1 ? "combo" : "combos";
+    lines.push(`${evidence.combo_names.length} ${label}: **${evidence.combo_names.join(", ")}**`);
+  } else {
+    lines.push("No combo names were safely extracted from this result.");
+  }
 
-  const completion = await groq.chat.completions.create({
-    model: MODEL,
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.2,
-    max_completion_tokens: 1000,
-    reasoning_effort: "none",
-  });
+  const next = nextAuditCommand(session);
+  if (next) {
+    lines.push(`\nNext command:\n\`\`\`\n${next}\n\`\`\``);
+  } else {
+    lines.push("\n**Educated character audit complete.** 📚✅");
+  }
 
-  return (
-    completion.choices[0]?.message?.content ||
-    "Atlas could not produce a grounded analysis of this Genesis result."
-  ).trim();
+  return lines.join("\n");
 }
 
-async function answerHumanMessage(message, question) {
-  const prompt = `
-${HUMAN_RULES}
+async function processGenesisBuffer(channelId) {
+  const buffer = genesisBuffers.get(channelId);
+  if (!buffer) return;
+  genesisBuffers.delete(channelId);
 
-USER MESSAGE:
-${question || "Hello"}
-  `.trim();
+  const genesisText = buffer.texts.join("\n").trim();
+  const imageUrls = [...new Set(buffer.imageUrls)].slice(0, 3);
+  if (!genesisText && imageUrls.length === 0) return;
 
-  const completion = await groq.chat.completions.create({
-    model: MODEL,
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.3,
-    max_completion_tokens: 700,
-    reasoning_effort: "none",
-  });
+  pruneTTL(recentPayloadHashes, 60_000);
+  const hash = payloadHash(genesisText, imageUrls);
+  if (recentPayloadHashes.has(hash)) {
+    console.log("Skipping duplicate Genesis payload.");
+    return;
+  }
+  recentPayloadHashes.set(hash, Date.now());
 
-  const answer =
-    completion.choices[0]?.message?.content ||
-    "I couldn't produce an answer.";
+  const session = sessionFor(channelId);
 
-  await sendInChunks(message.channel, answer, message);
+  try {
+    await buffer.channel.sendTyping();
+    const evidence = await analyzeGenesis(genesisText, imageUrls, session);
+    console.log("Peebles evidence:", JSON.stringify(evidence));
+
+    const response = resultMessage(session, evidence);
+    await sendInChunks(buffer.channel, response);
+  } catch (error) {
+    console.error("Genesis processing error:", error);
+    await buffer.channel.send(
+      "Peebles saw Genesis, but the Groq analysis failed. Check the Render log for the exact error."
+    );
+  }
 }
 
 function queueGenesisMessage(message) {
+  pruneTTL(seenGenesisMessageIds, 5 * 60_000);
+
+  if (seenGenesisMessageIds.has(message.id)) return;
+  seenGenesisMessageIds.set(message.id, Date.now());
+
   const channelId = message.channel.id;
   const existing = genesisBuffers.get(channelId) || {
     channel: message.channel,
@@ -286,82 +322,105 @@ function queueGenesisMessage(message) {
     timer: null,
   };
 
-  const text = message.content.trim();
+  const text = String(message.content || "").trim();
   if (text) existing.texts.push(text);
+
   existing.imageUrls.push(...getImageUrls(message));
   existing.imageUrls = [...new Set(existing.imageUrls)].slice(0, 3);
 
   if (existing.timer) clearTimeout(existing.timer);
-
-  existing.timer = setTimeout(async () => {
-    genesisBuffers.delete(channelId);
-
-    const genesisText = existing.texts.join("\n").trim();
-    const humanContext = recentHumanMessages.get(channelId);
-    const precedingHumanText =
-      humanContext && Date.now() - humanContext.at < 60_000
-        ? humanContext.text
-        : "";
-
-    if (!genesisText && existing.imageUrls.length === 0) return;
-
-    try {
-      await existing.channel.sendTyping();
-
-      const evidence = await extractLiteralGenesisEvidence(
-        genesisText,
-        existing.imageUrls,
-      );
-
-      console.log(
-        "Genesis literal evidence:",
-        JSON.stringify(evidence),
-      );
-
-      const analysis = await analyzeGenesisEvidence(
-        genesisText,
-        evidence,
-        precedingHumanText,
-      );
-
-      await sendInChunks(existing.channel, analysis);
-    } catch (error) {
-      console.error("Genesis analysis error:", error);
-      await existing.channel.send(
-        "Atlas saw the Genesis result but couldn't analyze it reliably. Check the Render log for the exact error.",
-      );
-    }
-  }, 1400);
+  existing.timer = setTimeout(
+    () => processGenesisBuffer(channelId),
+    BUFFER_MS
+  );
 
   genesisBuffers.set(channelId, existing);
 }
 
+async function deterministicPeeblesCommand(message, question) {
+  const session = sessionFor(message.channel.id);
+  const q = normalize(question);
+
+  if (!q || q === "help") {
+    await message.reply(
+      [
+        "**Peebles v2** 🤖",
+        "`@Peebles start educated` — reset/start the Educated audit",
+        "`@Peebles next` — show the next Genesis command",
+        "`@Peebles status` — show audit progress",
+        "`@Peebles reset audit` — clear audit progress",
+        "",
+        "Peebles automatically watches Genesis in this channel. You do not need to screenshot Genesis results for Peebles.",
+      ].join("\n")
+    );
+    return true;
+  }
+
+  if (q === "start educated" || q === "reset audit") {
+    sessions.set(message.channel.id, newSession());
+    const fresh = sessionFor(message.channel.id);
+    await message.reply(
+      `Educated audit reset. 📚\nNext command:\n\`\`\`\n${nextAuditCommand(fresh)}\n\`\`\``
+    );
+    return true;
+  }
+
+  if (q === "next") {
+    const next = nextAuditCommand(session);
+    await message.reply(
+      next
+        ? `Next command:\n\`\`\`\n${next}\n\`\`\``
+        : "Educated character audit is complete. ✅"
+    );
+    return true;
+  }
+
+  if (q === "status") {
+    const total = session.audit.length;
+    const done = session.checked.size;
+    const next = nextAuditCommand(session);
+    await message.reply(
+      [
+        `**Educated audit:** ${done}/${total} checked`,
+        `Current/last command: ${session.currentCommand || "(none)"}`,
+        `Next: ${next || "complete ✅"}`,
+      ].join("\n")
+    );
+    return true;
+  }
+
+  return false;
+}
+
 client.once("clientReady", () => {
-  console.log(`Atlas online as ${client.user.tag}`);
+  console.log(`Peebles online as ${client.user.tag}`);
+  console.log(`Groq model: ${MODEL}`);
 });
 
 client.on("messageCreate", async (message) => {
+  if (!client.user) return;
   if (message.author.id === client.user.id) return;
 
-  const isGenesis =
-    message.author.id === process.env.GENESIS_BOT_ID;
   const isTargetChannel =
     message.channel.id === process.env.DISCORD_CHANNEL_ID;
+  const isGenesis =
+    message.author.id === process.env.GENESIS_BOT_ID;
 
-  if (!message.author.bot) {
-    recentHumanMessages.set(message.channel.id, {
-      text: message.content.trim(),
-      at: Date.now(),
-    });
-  }
+  // Watch only the dedicated Genesis channel.
+  if (!isTargetChannel) return;
 
   if (isGenesis) {
-    if (!isTargetChannel) return;
     queueGenesisMessage(message);
     return;
   }
 
   if (message.author.bot) return;
+
+  // Track verified commands the human actually typed.
+  const session = sessionFor(message.channel.id);
+  markCommandObserved(session, message.content);
+
+  // Peebles only talks to humans when mentioned.
   if (!message.mentions.has(client.user)) return;
 
   const question = message.content
@@ -370,14 +429,17 @@ client.on("messageCreate", async (message) => {
 
   try {
     await message.channel.sendTyping();
-    await answerHumanMessage(message, question);
-  } catch (error) {
-    console.error("Human message error:", error);
+
+    const handled = await deterministicPeeblesCommand(message, question);
+    if (handled) return;
+
     await message.reply(
-      "Atlas hit an API error. Check the Render log for the exact error.",
+      "I’m keeping this build narrow on purpose. Use `@Peebles help`, `next`, `status`, or `start educated`. Genesis results are watched automatically."
     );
+  } catch (error) {
+    console.error("Human command error:", error);
+    await message.reply("Peebles hit an error. Check the Render log.");
   }
 });
 
 client.login(process.env.DISCORD_BOT_TOKEN);
-
