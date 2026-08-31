@@ -61,6 +61,8 @@ async function relayToAtlas(session, genesisText, imageUrls, evidence, channelId
     command: session.currentCommand || "",
     genesis_text: genesisText || "",
     combo_names: Array.isArray(evidence.combo_names) ? evidence.combo_names : [],
+    visible_facts: Array.isArray(evidence.visible_facts) ? evidence.visible_facts : [],
+    no_combos_found: evidence.no_combos_found === true,
     fully_readable: evidence.fully_readable === true,
     image_urls: imageUrls || [],
     discord_channel_id: channelId,
@@ -145,6 +147,9 @@ function newSession() {
       "fry",
       "hayley",
       "gene",
+      "hank",
+      "bill",
+      "amy",
     ]),
     currentCommand: null,
     awaitingGenesis: false,
@@ -386,6 +391,9 @@ async function processGenesisBuffer(channelId) {
     let response = resultMessage(session, evidence);
     if (relay && relay.ok) {
       response += "\n\n**Relayed to Atlas. ✅**";
+      if (Array.isArray(relay.warnings) && relay.warnings.length) {
+        response += "\n_Image filing warning logged; relay data still reached Atlas._";
+      }
     } else if (relay && !relay.skipped) {
       response += "\n\n**Atlas relay failed. ⚠️ Check Render logs.**";
     }
@@ -499,6 +507,7 @@ async function deterministicPeeblesCommand(message, question) {
 client.once("clientReady", () => {
   console.log(`Peebles online as ${client.user.tag}`);
   console.log(`Groq model: ${MODEL}`);
+  console.log("Peebles build: v6 Atlas Relay");
 });
 
 client.on("messageCreate", async (message) => {
