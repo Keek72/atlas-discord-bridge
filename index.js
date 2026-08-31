@@ -69,6 +69,11 @@ const EDUCATED_AUDIT = [
 
 const sessions = new Map();
 const genesisBuffers = new Map();
+
+// Runtime channel binding. Human mention commands work in any channel.
+// "start educated" binds Genesis watching to that channel until restart.
+// Falls back to DISCORD_CHANNEL_ID after a restart.
+let activeChannelId = process.env.DISCORD_CHANNEL_ID || null;
 const seenGenesisMessageIds = new Map();
 const recentPayloadHashes = new Map();
 
@@ -384,10 +389,12 @@ async function deterministicPeeblesCommand(message, question) {
   }
 
   if (q === "start educated" || q === "reset audit") {
+    activeChannelId = message.channel.id;
     sessions.set(message.channel.id, newSession());
     const fresh = sessionFor(message.channel.id);
+    console.log(`Peebles bound Educated audit to channel ${activeChannelId}`);
     await message.reply(
-      `Educated audit reset. 📚\nNext command:\n\`\`\`\n${nextAuditCommand(fresh)}\n\`\`\``
+      `Educated audit bound to this channel. 📚✅\nNext command:\n\`\`\`\n${nextAuditCommand(fresh)}\n\`\`\``
     );
     return true;
   }
@@ -409,6 +416,8 @@ async function deterministicPeeblesCommand(message, question) {
     await message.reply(
       [
         `**Educated audit:** ${done}/${total} checked`,
+        `Bound channel: ${activeChannelId || "(none)"}`,
+        `This channel: ${message.channel.id}`,
         `Pending Genesis: ${session.awaitingGenesis ? session.currentCommand : "(none)"}`,
         `Next: ${next || "complete ✅"}`,
       ].join("\n")
@@ -428,37 +437,53 @@ client.on("messageCreate", async (message) => {
   if (!client.user) return;
   if (message.author.id === client.user.id) return;
 
-  const isTargetChannel =
-    message.channel.id === process.env.DISCORD_CHANNEL_ID;
-  const isGenesis =
-    message.author.id === process.env.GENESIS_BOT_ID;
+  const isGenesis = message.author.id === process.env.GENESIS_BOT_ID;
+  const botWasMentioned =
+    message.mentions.users.has(client.user.id) ||
+    message.mentions.members?.has(client.user.id);
 
-  // Watch only the dedicated Genesis channel.
-  if (!isTargetChannel) return;
+  // Diagnostic line for every relevant message event.
+  if (isGenesis || botWasMentioned) {
+    console.log(
+      "Peebles message event:",
+      JSON.stringify({
+        channelId: message.channel.id,
+        authorId: message.author.id,
+        author: message.author.tag,
+        isGenesis,
+        botWasMentioned,
+        content: message.content || "",
+        activeChannelId,
+        envChannelId: process.env.DISCORD_CHANNEL_ID || null,
+      })
+    );
+  }
 
+  // Genesis is only watched in the currently bound audit channel.
   if (isGenesis) {
+    if (!activeChannelId || message.channel.id !== activeChannelId) {
+      console.log(
+        `Ignoring Genesis from channel ${message.channel.id}; active channel is ${activeChannelId || "(none)"}`
+      );
+      return;
+    }
     queueGenesisMessage(message);
     return;
   }
 
   if (message.author.bot) return;
 
-  const session = sessionFor(message.channel.id);
+  // Track a literal audit command only in the bound channel.
+  if (activeChannelId && message.channel.id === activeChannelId) {
+    const session = sessionFor(message.channel.id);
+    markCommandObserved(session, message.content);
+  }
 
-  // Track a literal Genesis command typed by the human.
-  // This does not require mentioning Peebles.
-  markCommandObserved(session, message.content);
+  // Human mention commands work in ANY channel.
+  if (!botWasMentioned) return;
 
-  // Peebles only talks conversationally when mentioned.
-  const mentioned =
-    message.mentions.users.has(client.user.id) ||
-    message.mentions.members?.has(client.user.id);
-
-  if (!mentioned) return;
-
-  // Discord normally stores mentions as <@ID> or <@!ID>.
-  // Strip every mentioned-user token, then normalize.
   let question = String(message.content || "");
+
   for (const [id] of message.mentions.users) {
     question = question
       .replaceAll(`<@${id}>`, " ")
@@ -471,15 +496,15 @@ client.on("messageCreate", async (message) => {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Defensive fallback for mobile Discord mention rendering.
   const rawLower = normalize(message.content);
-  if (!question || question === rawLower) {
-    if (rawLower.includes("start educated")) question = "start educated";
-    else if (rawLower.includes("reset audit")) question = "reset audit";
-    else if (rawLower.includes("status")) question = "status";
-    else if (rawLower.includes("next")) question = "next";
-    else if (rawLower.includes("help")) question = "help";
-  }
+
+  // Mobile Discord can make mention text ugly. Detect supported commands
+  // from the raw message as a deterministic fallback.
+  if (rawLower.includes("start educated")) question = "start educated";
+  else if (rawLower.includes("reset audit")) question = "reset audit";
+  else if (rawLower.includes("status")) question = "status";
+  else if (rawLower.includes("next")) question = "next";
+  else if (rawLower.includes("help")) question = "help";
 
   console.log("Peebles human command parsed as:", JSON.stringify(question));
 
@@ -490,7 +515,7 @@ client.on("messageCreate", async (message) => {
     if (handled) return;
 
     await message.reply(
-      "I’m keeping this build narrow on purpose. Use `@Peebles help`, `next`, `status`, or `start educated`. Genesis results are watched automatically."
+      "Use `@Peebles help`, `start educated`, `next`, `status`, or `reset audit`."
     );
   } catch (error) {
     console.error("Human command error:", error);
