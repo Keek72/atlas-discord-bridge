@@ -504,10 +504,40 @@ async function deterministicPeeblesCommand(message, question) {
   return false;
 }
 
-client.once("clientReady", () => {
+client.once("clientReady", async () => {
   console.log(`Peebles online as ${client.user.tag}`);
   console.log(`Groq model: ${MODEL}`);
-  console.log("Peebles build: v6 Atlas Relay");
+  console.log("Peebles build: v7 Auto Resume Relay");
+
+  // Auto-bind to the configured Genesis channel on every startup.
+  if (process.env.DISCORD_CHANNEL_ID) {
+    activeChannelId = process.env.DISCORD_CHANNEL_ID;
+    const session = sessionFor(activeChannelId);
+    console.log(`Peebles auto-bound to channel ${activeChannelId}`);
+
+    // Best-effort startup notice so the user does not need to @mention Peebles.
+    try {
+      const channel = await client.channels.fetch(activeChannelId);
+      if (channel && channel.isTextBased()) {
+        const next = nextAuditCommand(session);
+        if (next) {
+          await channel.send(
+            `**Peebles online and audit resumed. 🤖✅**
+Next command:
+\`\`\`
+${next}
+\`\`\``
+          );
+        } else {
+          await channel.send("**Peebles online. Educated audit is complete. ✅**");
+        }
+      }
+    } catch (err) {
+      console.error("Startup channel notice failed:", err);
+    }
+  } else {
+    console.warn("No DISCORD_CHANNEL_ID set; Peebles cannot auto-bind on startup.");
+  }
 });
 
 client.on("messageCreate", async (message) => {
@@ -550,13 +580,24 @@ client.on("messageCreate", async (message) => {
 
   if (message.author.bot) return;
 
-  // Track a literal audit command only in the bound channel.
+  // Track a literal audit command in the bound channel.
+  // No @mention is required for normal Genesis audit commands.
   if (activeChannelId && message.channel.id === activeChannelId) {
     const session = sessionFor(message.channel.id);
-    markCommandObserved(session, message.content);
+    const observed = markCommandObserved(session, message.content);
+
+    if (observed && !botWasMentioned) {
+      try {
+        await message.react("👀");
+      } catch (err) {
+        console.log("Could not react to audit command:", String(err));
+      }
+      console.log(`Peebles is waiting for Genesis result from: ${session.currentCommand}`);
+      return;
+    }
   }
 
-  // Human mention commands work in ANY channel.
+  // Conversational/control commands still require a mention.
   if (!botWasMentioned) return;
 
   let question = String(message.content || "");
