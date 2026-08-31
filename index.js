@@ -424,7 +424,8 @@ client.on("messageCreate", async (message) => {
   if (!message.mentions.has(client.user)) return;
 
   const question = message.content
-    .replace(new RegExp(`<@!?${client.user.id}>`, "g"), "")
+    .replace(/<@!?\d+>/g, "")
+    .replace(/^\s*@?peebles\b[,:]?\s*/i, "")
     .trim();
 
   try {
