@@ -20,6 +20,10 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
+if (!process.env.PEEBLES_RELAY_URL || !process.env.PEEBLES_RELAY_SECRET) {
+  console.warn("Atlas relay is not configured yet. Set PEEBLES_RELAY_URL and PEEBLES_RELAY_SECRET.");
+}
+
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
@@ -41,6 +45,55 @@ const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY,
   baseURL: "https://api.groq.com/openai/v1",
 });
+
+async function relayToAtlas(session, genesisText, imageUrls, evidence, channelId) {
+  const url = process.env.PEEBLES_RELAY_URL;
+  const secret = process.env.PEEBLES_RELAY_SECRET;
+
+  if (!url || !secret) {
+    console.log("Atlas relay not configured; skipping relay.");
+    return { ok: false, skipped: true };
+  }
+
+  const payload = {
+    secret,
+    trait: session.trait || "",
+    command: session.currentCommand || "",
+    genesis_text: genesisText || "",
+    combo_names: Array.isArray(evidence.combo_names) ? evidence.combo_names : [],
+    fully_readable: evidence.fully_readable === true,
+    image_urls: imageUrls || [],
+    discord_channel_id: channelId,
+    notes: Array.isArray(evidence.unreadable) && evidence.unreadable.length
+      ? `Unreadable: ${evidence.unreadable.join("; ")}`
+      : (evidence.confidence_note || "")
+  };
+
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      redirect: "follow",
+    });
+
+    const body = await resp.text();
+    console.log("Atlas relay response:", resp.status, body);
+
+    if (!resp.ok) return { ok: false, status: resp.status, body };
+
+    try {
+      const parsed = JSON.parse(body);
+      return parsed;
+    } catch {
+      return { ok: true, body };
+    }
+  } catch (err) {
+    console.error("Atlas relay error:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
 
 // ---------------------------
 // Verified command workflow
@@ -321,7 +374,22 @@ async function processGenesisBuffer(channelId) {
     const evidence = await analyzeGenesis(genesisText, imageUrls, session);
     console.log("Peebles evidence:", JSON.stringify(evidence));
 
-    const response = resultMessage(session, evidence);
+    // Relay BEFORE resultMessage clears currentCommand.
+    const relay = await relayToAtlas(
+      session,
+      genesisText,
+      imageUrls,
+      evidence,
+      channelId
+    );
+
+    let response = resultMessage(session, evidence);
+    if (relay && relay.ok) {
+      response += "\n\n**Relayed to Atlas. ✅**";
+    } else if (relay && !relay.skipped) {
+      response += "\n\n**Atlas relay failed. ⚠️ Check Render logs.**";
+    }
+
     await sendInChunks(buffer.channel, response);
   } catch (error) {
     console.error("Genesis processing error:", error);
