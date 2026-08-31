@@ -77,8 +77,19 @@ function newSession() {
     mode: "educated_audit",
     trait: "educated",
     audit: [...EDUCATED_AUDIT],
-    checked: new Set(),
+    // Already verified before this rebuild: Peggy, Professor Farnsworth,
+    // Bob, Bender, Fry, Hayley, Gene. Continue at Hank.
+    checked: new Set([
+      "peggy",
+      "professor farnsworth",
+      "bob",
+      "bender",
+      "fry",
+      "hayley",
+      "gene",
+    ]),
     currentCommand: null,
+    awaitingGenesis: false,
     lastGenesisAt: 0,
     lastResult: null,
   };
@@ -111,9 +122,14 @@ function commandCharacter(text, trait = "educated") {
 
 function markCommandObserved(session, text) {
   const char = commandCharacter(text, session.trait);
-  if (!char) return;
+  if (!char) return false;
+
+  // Only accept commands that belong to the verified audit queue.
+  if (!session.audit.includes(char)) return false;
+
   session.currentCommand = `combos ${session.trait} ${char}`;
-  // Mark checked only after Genesis actually returns a result.
+  session.awaitingGenesis = true;
+  return true;
 }
 
 function getImageUrls(message) {
@@ -247,6 +263,8 @@ function resultMessage(session, evidence) {
 
   session.lastResult = evidence;
   session.lastGenesisAt = Date.now();
+  session.awaitingGenesis = false;
+  session.currentCommand = null;
 
   const lines = [];
   lines.push(evidence.fully_readable ? "**Fully readable. ✅**" : "**Not fully readable. ⚠️**");
@@ -309,12 +327,21 @@ async function processGenesisBuffer(channelId) {
 }
 
 function queueGenesisMessage(message) {
+  const channelId = message.channel.id;
+  const session = sessionFor(channelId);
+
+  // Critical guardrail: ignore unrelated Genesis traffic.
+  // Peebles only reads Genesis after the user has typed the exact
+  // verified audit command Peebles is waiting on.
+  if (!session.awaitingGenesis || !session.currentCommand) {
+    console.log("Ignoring unrelated Genesis result; no audit command is pending.");
+    return;
+  }
+
   pruneTTL(seenGenesisMessageIds, 5 * 60_000);
 
   if (seenGenesisMessageIds.has(message.id)) return;
   seenGenesisMessageIds.set(message.id, Date.now());
-
-  const channelId = message.channel.id;
   const existing = genesisBuffers.get(channelId) || {
     channel: message.channel,
     texts: [],
@@ -382,7 +409,7 @@ async function deterministicPeeblesCommand(message, question) {
     await message.reply(
       [
         `**Educated audit:** ${done}/${total} checked`,
-        `Current/last command: ${session.currentCommand || "(none)"}`,
+        `Pending Genesis: ${session.awaitingGenesis ? session.currentCommand : "(none)"}`,
         `Next: ${next || "complete ✅"}`,
       ].join("\n")
     );
@@ -416,17 +443,45 @@ client.on("messageCreate", async (message) => {
 
   if (message.author.bot) return;
 
-  // Track verified commands the human actually typed.
   const session = sessionFor(message.channel.id);
+
+  // Track a literal Genesis command typed by the human.
+  // This does not require mentioning Peebles.
   markCommandObserved(session, message.content);
 
-  // Peebles only talks to humans when mentioned.
-  if (!message.mentions.has(client.user)) return;
+  // Peebles only talks conversationally when mentioned.
+  const mentioned =
+    message.mentions.users.has(client.user.id) ||
+    message.mentions.members?.has(client.user.id);
 
-  const question = message.content
-    .replace(/<@!?\d+>/g, "")
+  if (!mentioned) return;
+
+  // Discord normally stores mentions as <@ID> or <@!ID>.
+  // Strip every mentioned-user token, then normalize.
+  let question = String(message.content || "");
+  for (const [id] of message.mentions.users) {
+    question = question
+      .replaceAll(`<@${id}>`, " ")
+      .replaceAll(`<@!${id}>`, " ");
+  }
+
+  question = question
+    .replace(/<@!?\d+>/g, " ")
     .replace(/^\s*@?peebles\b[,:]?\s*/i, "")
+    .replace(/\s+/g, " ")
     .trim();
+
+  // Defensive fallback for mobile Discord mention rendering.
+  const rawLower = normalize(message.content);
+  if (!question || question === rawLower) {
+    if (rawLower.includes("start educated")) question = "start educated";
+    else if (rawLower.includes("reset audit")) question = "reset audit";
+    else if (rawLower.includes("status")) question = "status";
+    else if (rawLower.includes("next")) question = "next";
+    else if (rawLower.includes("help")) question = "help";
+  }
+
+  console.log("Peebles human command parsed as:", JSON.stringify(question));
 
   try {
     await message.channel.sendTyping();
